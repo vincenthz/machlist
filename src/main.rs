@@ -22,6 +22,25 @@ struct ServerDef {
     proxy: Option<bool>,
 }
 
+fn home() -> PathBuf {
+    // even though it's deprecated, it's still a relatively good/cheaper option,
+    // at least better than just getting $HOME directly ..
+    #[allow(deprecated)]
+    std::env::home_dir().expect("HOME directory")
+}
+
+fn ssh_dir() -> PathBuf {
+    let mut path = home();
+    path.push(".ssh");
+    path
+}
+
+fn machlist_local() -> PathBuf {
+    let mut path = home();
+    path.push(".machlist/resources.toml");
+    path
+}
+
 fn user_host(user: Option<&str>, host: &str) -> String {
     match user {
         Some(u) => format!("{}@{}", u, host),
@@ -29,9 +48,24 @@ fn user_host(user: Option<&str>, host: &str) -> String {
     }
 }
 
+/// Get the resources file
+///
+/// If specified (Some), then we only this file directly,
+/// but when unspecified (None), we look at a local file called ./machlist-resources.toml
+/// and then ~/.machlist/resources.toml
 fn parse_resources<P: AsRef<Path>>(file: Option<P>) -> Result<Resource> {
     let content = match file {
-        None => std::fs::read_to_string("resources.toml")?,
+        None => {
+            let local = machlist_local();
+            let path = Path::new("machlist-resources.toml");
+            if path.is_file() {
+                std::fs::read_to_string(path)?
+            } else if local.is_file() {
+                std::fs::read_to_string(local)?
+            } else {
+                panic!("no machlist file found")
+            }
+        }
         Some(p) => std::fs::read_to_string(p)?,
     };
 
@@ -89,7 +123,9 @@ fn ssh(common: &CommonArgs, target_env: &str, machine_name: &str) -> Result<()> 
         command.arg("-v");
     }
 
-    let hostfile = format!("{}/.ssh/known_hosts_machlist_{}", env!("HOME"), target_env);
+    let mut path = ssh_dir();
+    path.push(format!("known_hosts_machlist_{}", target_env));
+    let hostfile = path.as_path().display().to_string();
 
     let user_known_host_arg = format!("-oUserKnownHostsFile={}", hostfile);
 
