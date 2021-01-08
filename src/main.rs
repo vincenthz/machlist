@@ -106,39 +106,44 @@ impl EnvironmentDef {
     }
 }
 
-fn ssh(common: &CommonArgs, target_env: &str, machine_name: &str) -> Result<()> {
-    let resources = parse_resources(common.res_file.as_ref())?;
+pub struct Ssh {
+    args: Vec<String>,
+    dest: String,
+}
 
+fn ssh_login(
+    user: Option<&str>,
+    resources: &Resource,
+    target_env: &str,
+    machine_name: &str,
+) -> Result<Ssh> {
     let envdef = resources.get_target_env(target_env)?;
     let machine_def = envdef.get_machine(machine_name)?;
 
-    let jump = match &machine_def.jump {
-        None => None,
-        Some(jump_machine) => Some(envdef.get_machine(jump_machine)?),
-    };
+    let mut args = Vec::new();
 
-    let mut command = Command::new("ssh");
-
-    if common.verbose > 0 {
-        command.arg("-v");
-    }
-
+    // user known hosts files option
     let mut path = ssh_dir();
     path.push(format!("known_hosts_machlist_{}", target_env));
     let hostfile = path.as_path().display().to_string();
 
     let user_known_host_arg = format!("-oUserKnownHostsFile={}", hostfile);
 
-    command.arg(user_known_host_arg);
+    args.push(user_known_host_arg);
 
-    let user = resources.get_username()?;
+    // jump option
+    let jump = match &machine_def.jump {
+        None => None,
+        Some(jump_machine) => Some(envdef.get_machine(jump_machine)?),
+    };
 
     match jump {
         None => (),
         Some(def) => {
             let ip = def.ip.clone().expect("jump proxy to have an ip");
             let jump_str = user_host(user.as_deref(), &ip);
-            command.arg("-J").arg(jump_str);
+            args.push("-J".to_string());
+            args.push(jump_str);
         }
     };
 
@@ -149,16 +154,67 @@ fn ssh(common: &CommonArgs, target_env: &str, machine_name: &str) -> Result<()> 
     } else {
         bail!("targetted machine doesn't have IP or name")
     };
+    Ok(Ssh {
+        args,
+        dest: ssh_dest,
+    })
+}
+
+fn shell(common: &CommonArgs, target_env: &str, machine_name: &str) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let resources = parse_resources(common.res_file.as_ref())?;
+    let user = resources.get_username()?;
+
+    let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
 
     println!(
-        "connecting target environment={} dest={}: {:?}",
-        machine_name, target_env, ssh_dest
+        "connecting target environment={} dest={}",
+        machine_name, target_env
     );
 
-    command.arg(ssh_dest);
+    let mut command = Command::new("ssh");
 
+    if common.verbose > 0 {
+        command.arg("-v");
+    }
+
+    for a in ssh_opt.args.into_iter() {
+        command.arg(a);
+    }
+    command.arg(ssh_opt.dest);
+    command.exec();
+    Ok(())
+}
+
+fn copy_from(
+    common: &CommonArgs,
+    target_env: &str,
+    machine_name: &str,
+    copy_path: &str,
+) -> Result<()> {
     use std::os::unix::process::CommandExt;
+    let resources = parse_resources(common.res_file.as_ref())?;
+    let user = resources.get_username()?;
 
+    let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
+
+    println!(
+        "connecting target environment={} dest={}",
+        machine_name, target_env
+    );
+
+    let mut command = Command::new("scp");
+
+    if common.verbose > 0 {
+        command.arg("-v");
+    }
+
+    for a in ssh_opt.args.into_iter() {
+        command.arg(a);
+    }
+    let src = format!("{}:{}", ssh_opt.dest, copy_path);
+    command.arg(src);
+    command.arg("./");
     command.exec();
     Ok(())
 }
@@ -189,17 +245,25 @@ fn main() -> Result<()> {
     const ARG_VERBOSE: &str = "verbose";
     const ARG_RES_FILE: &str = "res-file";
 
-    const SUBCMD_SSH: &str = "ssh";
+    const SUBCMD_SHELL: &str = "shell";
     const ARG_TARGET_ENV: &str = "target-env";
     const ARG_MACHINE: &str = "machine";
 
     const SUBCMD_LIST: &str = "list";
+
+    const SUBCMD_COPY_FROM: &str = "copy-from";
+    const ARG_COPY_FROM_PATH: &str = "copy-from-path";
+
+    const SUBCMD_COPY_TO: &str = "copy-to";
 
     let arg_target_env = Arg::with_name(ARG_TARGET_ENV)
         .help("Target environment (alpha, prod, ..)")
         .takes_value(true)
         .short("t")
         .long("target");
+    let arg_machine = Arg::with_name(ARG_MACHINE)
+        .help("machine destination")
+        .required(true);
 
     let app = App::new("machlist")
         .arg(
@@ -216,12 +280,19 @@ fn main() -> Result<()> {
                 .short("r"),
         )
         .subcommand(
-            SubCommand::with_name(SUBCMD_SSH)
-                .about("Ssh to a given resource")
+            SubCommand::with_name(SUBCMD_SHELL)
+                .about("Shell on a given resource")
                 .arg(&arg_target_env)
+                .arg(&arg_machine),
+        )
+        .subcommand(
+            SubCommand::with_name(SUBCMD_COPY_FROM)
+                .about("Copy file from a given resource")
+                .arg(&arg_target_env)
+                .arg(&arg_machine)
                 .arg(
-                    Arg::with_name(ARG_MACHINE)
-                        .help("machine destination")
+                    Arg::with_name(ARG_COPY_FROM_PATH)
+                        .help("Path to copy")
                         .required(true),
                 ),
         )
@@ -233,20 +304,27 @@ fn main() -> Result<()> {
     let m = app.get_matches();
 
     let verbose = m.occurrences_of(ARG_VERBOSE);
-    let res_file = m.value_of(ARG_RES_FILE); // .unwrap_or("resources.toml");
+    let res_file = m.value_of(ARG_RES_FILE);
 
     let common = CommonArgs {
         verbose,
         res_file: res_file.map(|v| v.to_string().into()),
     };
 
-    if let Some(m) = m.subcommand_matches(SUBCMD_SSH) {
-        let target_env = m.value_of(ARG_TARGET_ENV).unwrap_or("alpha");
+    const DEFAULT_ENV: &str = "alpha";
+
+    if let Some(m) = m.subcommand_matches(SUBCMD_SHELL) {
+        let target_env = m.value_of(ARG_TARGET_ENV).unwrap_or(DEFAULT_ENV);
         let machine = m.value_of(ARG_MACHINE).unwrap();
-        ssh(&common, &target_env, &machine)
+        shell(&common, &target_env, &machine)
     } else if let Some(m) = m.subcommand_matches(SUBCMD_LIST) {
         let target_env = m.value_of(ARG_TARGET_ENV);
         list(&common, &target_env)
+    } else if let Some(m) = m.subcommand_matches(SUBCMD_COPY_FROM) {
+        let target_env = m.value_of(ARG_TARGET_ENV).unwrap_or(DEFAULT_ENV);
+        let machine = m.value_of(ARG_MACHINE).unwrap();
+        let copy_path = m.value_of(ARG_COPY_FROM_PATH).unwrap();
+        copy_from(&common, &target_env, machine, copy_path)
     } else if let Some(name) = m.subcommand_name() {
         bail!("Unknown command {}", name);
     } else {
