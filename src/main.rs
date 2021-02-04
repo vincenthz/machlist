@@ -22,7 +22,6 @@ struct ServerDef {
     name: Option<String>,
     jump: Option<String>,
     proxy: Option<bool>,
-    resource: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
