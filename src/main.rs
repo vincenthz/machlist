@@ -2,17 +2,19 @@ use anyhow::{anyhow, bail, Result};
 use clap::{App, Arg, SubCommand};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Clone, Debug, Deserialize)]
 struct Resource {
     username: Option<String>,
-    server: HashMap<String, EnvironmentDef>,
+    server: HashMap<String, EnvironmentDef<ServerDef>>,
+    resource: HashMap<String, EnvironmentDef<ResourceDef>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct EnvironmentDef(HashMap<String, ServerDef>);
+struct EnvironmentDef<D>(HashMap<String, D>);
 
 #[derive(Clone, Debug, Deserialize)]
 struct ServerDef {
@@ -20,6 +22,14 @@ struct ServerDef {
     name: Option<String>,
     jump: Option<String>,
     proxy: Option<bool>,
+    resource: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResourceDef {
+    server: String,
+    at: String,
+    port: u16,
 }
 
 fn home() -> PathBuf {
@@ -74,10 +84,19 @@ fn parse_resources<P: AsRef<Path>>(file: Option<P>) -> Result<Resource> {
 }
 
 impl Resource {
-    pub fn get_target_env(&self, target_env: &str) -> Result<&EnvironmentDef> {
-        self.server
-            .get(target_env)
-            .ok_or(anyhow!("cannot find specified target environment"))
+    pub fn get_target_env(&self, target_env: &str) -> Result<&EnvironmentDef<ServerDef>> {
+        self.server.get(target_env).ok_or(anyhow!(
+            "cannot find specified target environment in servers"
+        ))
+    }
+
+    pub fn get_target_env_resources(
+        &self,
+        target_env: &str,
+    ) -> Result<&EnvironmentDef<ResourceDef>> {
+        self.resource.get(target_env).ok_or(anyhow!(
+            "cannot find specified target environment in resources"
+        ))
     }
 
     pub fn get_username(&self) -> Result<Option<String>> {
@@ -94,7 +113,7 @@ impl Resource {
     }
 }
 
-impl EnvironmentDef {
+impl EnvironmentDef<ServerDef> {
     pub fn get_machine(&self, machine_name: &str) -> Result<&ServerDef> {
         self.0
             .get(machine_name)
@@ -103,6 +122,14 @@ impl EnvironmentDef {
 
     pub fn list_non_proxies(&self) -> impl Iterator<Item = (&String, &ServerDef)> {
         self.0.iter().filter(|(_, v)| !v.proxy.unwrap_or(false))
+    }
+}
+
+impl EnvironmentDef<ResourceDef> {
+    pub fn get_resource(&self, resource_name: &str) -> Result<&ResourceDef> {
+        self.0
+            .get(resource_name)
+            .ok_or(anyhow!("cannot find resource {}", resource_name))
     }
 }
 
@@ -161,7 +188,6 @@ fn ssh_login(
 }
 
 fn shell(common: &CommonArgs, target_env: &str, machine_name: &str) -> Result<()> {
-    use std::os::unix::process::CommandExt;
     let resources = parse_resources(common.res_file.as_ref())?;
     let user = resources.get_username()?;
 
@@ -192,7 +218,6 @@ fn copy_from(
     machine_name: &str,
     copy_path: &str,
 ) -> Result<()> {
-    use std::os::unix::process::CommandExt;
     let resources = parse_resources(common.res_file.as_ref())?;
     let user = resources.get_username()?;
 
@@ -215,6 +240,84 @@ fn copy_from(
     let src = format!("{}:{}", ssh_opt.dest, copy_path);
     command.arg(src);
     command.arg("./");
+    command.exec();
+    Ok(())
+}
+
+fn copy_to(
+    common: &CommonArgs,
+    target_env: &str,
+    machine_name: &str,
+    copy_path: &str,
+) -> Result<()> {
+    let resources = parse_resources(common.res_file.as_ref())?;
+    let user = resources.get_username()?;
+
+    let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
+
+    println!(
+        "connecting target environment={} dest={}",
+        machine_name, target_env
+    );
+
+    let mut command = Command::new("scp");
+
+    if common.verbose > 0 {
+        command.arg("-v");
+    }
+
+    for a in ssh_opt.args.into_iter() {
+        command.arg(a);
+    }
+    let dst = format!("{}:", ssh_opt.dest);
+    command.arg(copy_path);
+    command.arg(dst);
+    command.exec();
+    Ok(())
+}
+
+fn tunnel(
+    common: &CommonArgs,
+    target_env: &str,
+    resource_name: &str,
+    local_port: Option<&str>,
+) -> Result<()> {
+    use std::str::FromStr;
+    let local_port = local_port.map(|x| u16::from_str(x).expect("local port is not valid port"));
+
+    let resources = parse_resources(common.res_file.as_ref())?;
+    let user = resources.get_username()?;
+
+    let defs = resources.get_target_env_resources(target_env)?;
+    let def = defs.get_resource(resource_name)?;
+
+    let machine_name = &def.server;
+
+    let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
+
+    println!(
+        "tunneling to target environment={} dest={}",
+        machine_name, target_env
+    );
+
+    let mut command = Command::new("ssh");
+
+    if common.verbose > 0 {
+        command.arg("-v");
+    }
+
+    for a in ssh_opt.args.into_iter() {
+        command.arg(a);
+    }
+
+    command.arg("-N"); // do not execute a remote command
+    command.arg("-L");
+
+    let port = local_port.unwrap_or(def.port);
+    let arg_forwarding = format!("{}:{}:{}", port, def.at, def.port);
+    command.arg(arg_forwarding);
+
+    command.arg(ssh_opt.dest);
     command.exec();
     Ok(())
 }
@@ -255,6 +358,11 @@ fn main() -> Result<()> {
     const ARG_COPY_FROM_PATH: &str = "copy-from-path";
 
     const SUBCMD_COPY_TO: &str = "copy-to";
+    const ARG_COPY_TO_PATH: &str = "copy-to-path";
+
+    const SUBCMD_TUNNEL: &str = "tunnel";
+    const ARG_TUNNEL_RESOURCE: &str = "tunnel-resource";
+    const ARG_TUNNEL_LOCAL_PORT: &str = "tunnel-local-port";
 
     let arg_target_env = Arg::with_name(ARG_TARGET_ENV)
         .help("Target environment (alpha, prod, ..)")
@@ -297,6 +405,28 @@ fn main() -> Result<()> {
                 ),
         )
         .subcommand(
+            SubCommand::with_name(SUBCMD_COPY_TO)
+                .about("Copy file to a given resource")
+                .arg(&arg_target_env)
+                .arg(&arg_machine)
+                .arg(
+                    Arg::with_name(ARG_COPY_TO_PATH)
+                        .help("Path to copy")
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name(SUBCMD_TUNNEL)
+                .about("Make a tunnel to resource")
+                .arg(&arg_target_env)
+                .arg(&arg_machine)
+                .arg(
+                    Arg::with_name(ARG_TUNNEL_RESOURCE)
+                        .help("Resource on machine to open")
+                        .required(true),
+                ),
+        )
+        .subcommand(
             SubCommand::with_name(SUBCMD_LIST)
                 .about("List resources")
                 .arg(arg_target_env),
@@ -325,6 +455,16 @@ fn main() -> Result<()> {
         let machine = m.value_of(ARG_MACHINE).unwrap();
         let copy_path = m.value_of(ARG_COPY_FROM_PATH).unwrap();
         copy_from(&common, &target_env, machine, copy_path)
+    } else if let Some(m) = m.subcommand_matches(SUBCMD_COPY_TO) {
+        let target_env = m.value_of(ARG_TARGET_ENV).unwrap_or(DEFAULT_ENV);
+        let machine = m.value_of(ARG_MACHINE).unwrap();
+        let copy_path = m.value_of(ARG_COPY_TO_PATH).unwrap();
+        copy_to(&common, &target_env, machine, copy_path)
+    } else if let Some(m) = m.subcommand_matches(SUBCMD_TUNNEL) {
+        let target_env = m.value_of(ARG_TARGET_ENV).unwrap_or(DEFAULT_ENV);
+        let resource = m.value_of(ARG_TUNNEL_RESOURCE).unwrap();
+        let local_port = m.value_of(ARG_TUNNEL_LOCAL_PORT);
+        tunnel(&common, &target_env, resource, local_port)
     } else if let Some(name) = m.subcommand_name() {
         bail!("Unknown command {}", name);
     } else {
