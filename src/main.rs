@@ -195,7 +195,7 @@ fn shell(common: &CommonArgs, target_env: &str, machine_name: &str) -> Result<()
 
     println!(
         "connecting target environment={} dest={}",
-        machine_name, target_env
+        target_env, machine_name,
     );
 
     let mut command = Command::new("ssh");
@@ -225,7 +225,7 @@ fn copy_from(
 
     println!(
         "connecting target environment={} dest={}",
-        machine_name, target_env
+        target_env, machine_name
     );
 
     let mut command = Command::new("scp");
@@ -257,7 +257,7 @@ fn copy_to(
 
     println!(
         "connecting target environment={} dest={}",
-        machine_name, target_env
+        target_env, machine_name,
     );
 
     let mut command = Command::new("scp");
@@ -292,12 +292,13 @@ fn tunnel(
     let def = defs.get_resource(resource_name)?;
 
     let machine_name = &def.server;
+    let local_port = local_port.unwrap_or(def.port);
 
     let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
 
     println!(
-        "tunneling to target environment={} dest={}",
-        machine_name, target_env
+        "tunneling to target environment={} resource={} at port {}",
+        resource_name, machine_name, local_port
     );
 
     let mut command = Command::new("ssh");
@@ -313,8 +314,7 @@ fn tunnel(
     command.arg("-N"); // do not execute a remote command
     command.arg("-L");
 
-    let port = local_port.unwrap_or(def.port);
-    let arg_forwarding = format!("{}:{}:{}", port, def.at, def.port);
+    let arg_forwarding = format!("{}:{}:{}", local_port, def.at, def.port);
     command.arg(arg_forwarding);
 
     command.arg(ssh_opt.dest);
@@ -419,11 +419,15 @@ fn main() -> Result<()> {
             SubCommand::with_name(SUBCMD_TUNNEL)
                 .about("Make a tunnel to resource")
                 .arg(&arg_target_env)
-                .arg(&arg_machine)
                 .arg(
                     Arg::with_name(ARG_TUNNEL_RESOURCE)
                         .help("Resource on machine to open")
                         .required(true),
+                )
+                .arg(
+                    Arg::with_name(ARG_TUNNEL_LOCAL_PORT)
+                        .help("port to bind (default to resource define)")
+                        .required(false),
                 ),
         )
         .subcommand(
