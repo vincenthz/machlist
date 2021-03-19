@@ -44,7 +44,7 @@ fn machlist_local() -> PathBuf {
 fn user_host(user: Option<&str>, host: &str) -> String {
     match user {
         Some(u) => format!("{}@{}", u, host),
-        None => format!("{}", host),
+        None => host.to_string(),
     }
 }
 
