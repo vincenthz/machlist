@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -85,7 +85,9 @@ impl Resource {
             None => Ok(None),
             Some(u) => {
                 if let Some(env_name) = u.strip_prefix("env:") {
-                    Ok(Some(std::env::var(env_name)?))
+                    Ok(Some(std::env::var(env_name).with_context(|| {
+                        format!("Cannot find environment variable {}", env_name)
+                    })?))
                 } else {
                     Ok(Some(u.clone()))
                 }
