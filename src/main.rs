@@ -77,7 +77,7 @@ impl Resource {
     pub fn get_target_env(&self, target_env: &str) -> Result<&EnvironmentDef> {
         self.server
             .get(target_env)
-            .ok_or(anyhow!("cannot find specified target environment"))
+            .ok_or_else(|| anyhow!("cannot find specified target environment"))
     }
 
     pub fn get_username(&self) -> Result<Option<String>> {
@@ -100,7 +100,7 @@ impl EnvironmentDef {
     pub fn get_machine(&self, machine_name: &str) -> Result<&ServerDef> {
         self.0
             .get(machine_name)
-            .ok_or(anyhow!("cannot find {}", machine_name))
+            .ok_or_else(|| anyhow!("cannot find {}", machine_name))
     }
 
     pub fn list_non_proxies(&self) -> impl Iterator<Item = (&String, &ServerDef)> {
