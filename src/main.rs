@@ -270,6 +270,7 @@ fn main() -> Result<()> {
     let app = App::new("machlist")
         .arg(
             Arg::with_name(ARG_VERBOSE)
+                .global(true)
                 .help("Increase client verbosity (use multiple times to increase)")
                 .multiple(true)
                 .short("v"),
