@@ -53,21 +53,10 @@ fn user_host(user: Option<&str>, host: &str) -> String {
 /// If specified (Some), then we only this file directly,
 /// but when unspecified (None), we look at a local file called ./machlist-resources.toml
 /// and then ~/.machlist/resources.toml
-fn parse_resources<P: AsRef<Path>>(file: Option<P>) -> Result<Resource> {
-    let content = match file {
-        None => {
-            let local = machlist_local();
-            let path = Path::new("machlist-resources.toml");
-            if path.is_file() {
-                std::fs::read_to_string(path)?
-            } else if local.is_file() {
-                std::fs::read_to_string(local)?
-            } else {
-                panic!("no machlist file found")
-            }
-        }
-        Some(p) => std::fs::read_to_string(p)?,
-    };
+fn parse_resources<P: AsRef<Path>>(file: P) -> Result<Resource> {
+    let file = file.as_ref();
+    let content = std::fs::read_to_string(file)
+        .with_context(|| format!("Failed to parse resource file {}", file.display()))?;
 
     let values: Resource = toml::de::from_str(&content)?;
     Ok(values)
@@ -164,7 +153,7 @@ fn ssh_login(
 
 fn shell(common: &CommonArgs, target_env: &str, machine_name: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let resources = parse_resources(common.res_file.as_ref())?;
+    let resources = parse_resources(&common.res_file)?;
     let user = resources.get_username()?;
 
     let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
@@ -195,7 +184,7 @@ fn copy_from(
     copy_path: &str,
 ) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let resources = parse_resources(common.res_file.as_ref())?;
+    let resources = parse_resources(&common.res_file)?;
     let user = resources.get_username()?;
 
     let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
@@ -222,7 +211,7 @@ fn copy_from(
 }
 
 fn list(common: &CommonArgs, target_env: &Option<&str>) -> Result<()> {
-    let resources = parse_resources(common.res_file.as_ref())?;
+    let resources = parse_resources(&common.res_file)?;
 
     if let Some(target_env) = target_env {
         let envdef = resources.get_target_env(*target_env)?;
@@ -240,7 +229,7 @@ fn list(common: &CommonArgs, target_env: &Option<&str>) -> Result<()> {
 
 struct CommonArgs {
     verbose: u64,
-    res_file: Option<PathBuf>,
+    res_file: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -257,6 +246,7 @@ fn main() -> Result<()> {
     const ARG_COPY_FROM_PATH: &str = "copy-from-path";
 
     const SUBCMD_COPY_TO: &str = "copy-to";
+    let default_machlist_file = machlist_local().display().to_string();
 
     let arg_target_env = Arg::with_name(ARG_TARGET_ENV)
         .help("Target environment (alpha, prod, ..)")
@@ -277,7 +267,9 @@ fn main() -> Result<()> {
         )
         .arg(
             Arg::with_name(ARG_RES_FILE)
-                .help("TOML Resource file to use (default: resources.toml)")
+                .help("TOML Resource file to use")
+                .default_value(default_machlist_file.as_str())
+                .global(true)
                 .multiple(false)
                 .takes_value(true)
                 .short("r"),
@@ -307,12 +299,9 @@ fn main() -> Result<()> {
     let m = app.get_matches();
 
     let verbose = m.occurrences_of(ARG_VERBOSE);
-    let res_file = m.value_of(ARG_RES_FILE);
+    let res_file = m.value_of(ARG_RES_FILE).unwrap().into();
 
-    let common = CommonArgs {
-        verbose,
-        res_file: res_file.map(|v| v.to_string().into()),
-    };
+    let common = CommonArgs { verbose, res_file };
 
     const DEFAULT_ENV: &str = "alpha";
 
