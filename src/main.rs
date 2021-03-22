@@ -266,6 +266,41 @@ fn copy_to(
     Ok(())
 }
 
+fn rsync_to(
+    common: &CommonArgs,
+    target_env: &str,
+    machine_name: &str,
+    source: &str,
+    destination: &str,
+) -> Result<()> {
+    let resources = parse_resources(&common.res_file)?;
+    let user = resources.get_username()?;
+
+    let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
+
+    println!(
+        "connecting target environment={} dest={}",
+        target_env, machine_name,
+    );
+
+    let mut command = Command::new("rsync");
+
+    if common.verbose > 0 {
+        command.arg("-v");
+    }
+
+    let ssh_opts_joined = ssh_opt.args.join(" ");
+    command.arg("-e");
+    command.arg(format!("ssh {}", ssh_opts_joined));
+    //command.arg(ssh_opt.dest);
+    let dst = format!("{}:{}", ssh_opt.dest, destination);
+
+    command.arg(source);
+    command.arg(dst);
+    command.exec();
+    Ok(())
+}
+
 fn tunnel(
     common: &CommonArgs,
     target_env: &str,
@@ -350,6 +385,10 @@ fn main() -> Result<()> {
     const SUBCMD_COPY_TO: &str = "copy-to";
     const ARG_COPY_TO_PATH: &str = "copy-to-path";
 
+    const SUBCMD_RSYNC_TO: &str = "rsync-to";
+    const ARG_RSYNC_TO_SOURCE: &str = "rsync-to-source";
+    const ARG_RSYNC_TO_DESTINATION: &str = "rsync-to-destination";
+
     const SUBCMD_TUNNEL: &str = "tunnel";
     const ARG_TUNNEL_RESOURCE: &str = "tunnel-resource";
     const ARG_TUNNEL_LOCAL_PORT: &str = "tunnel-local-port";
@@ -411,6 +450,22 @@ fn main() -> Result<()> {
                 ),
         )
         .subcommand(
+            SubCommand::with_name(SUBCMD_RSYNC_TO)
+                .about("Rsync to given resource")
+                .arg(&arg_target_env)
+                .arg(&arg_machine)
+                .arg(
+                    Arg::with_name(ARG_RSYNC_TO_SOURCE)
+                        .help("Path to rsync")
+                        .required(true),
+                )
+                .arg(
+                    Arg::with_name(ARG_RSYNC_TO_DESTINATION)
+                        .help("Path on destination")
+                        .required(true),
+                ),
+        )
+        .subcommand(
             SubCommand::with_name(SUBCMD_TUNNEL)
                 .about("Make a tunnel to resource")
                 .arg(&arg_target_env)
@@ -456,6 +511,12 @@ fn main() -> Result<()> {
         let machine = m.value_of(ARG_MACHINE).unwrap();
         let copy_path = m.value_of(ARG_COPY_TO_PATH).unwrap();
         copy_to(&common, &target_env, machine, copy_path)
+    } else if let Some(m) = m.subcommand_matches(SUBCMD_RSYNC_TO) {
+        let target_env = m.value_of(ARG_TARGET_ENV).unwrap_or(DEFAULT_ENV);
+        let machine = m.value_of(ARG_MACHINE).unwrap();
+        let source = m.value_of(ARG_RSYNC_TO_SOURCE).unwrap();
+        let destination = m.value_of(ARG_RSYNC_TO_DESTINATION).unwrap();
+        rsync_to(&common, &target_env, machine, source, destination)
     } else if let Some(m) = m.subcommand_matches(SUBCMD_TUNNEL) {
         let target_env = m.value_of(ARG_TARGET_ENV).unwrap_or(DEFAULT_ENV);
         let resource = m.value_of(ARG_TUNNEL_RESOURCE).unwrap();
