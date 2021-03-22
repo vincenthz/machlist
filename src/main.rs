@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{App, Arg, SubCommand};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -53,7 +53,7 @@ fn machlist_local() -> PathBuf {
 fn user_host(user: Option<&str>, host: &str) -> String {
     match user {
         Some(u) => format!("{}@{}", u, host),
-        None => format!("{}", host),
+        None => host.to_string(),
     }
 }
 
@@ -62,21 +62,10 @@ fn user_host(user: Option<&str>, host: &str) -> String {
 /// If specified (Some), then we only this file directly,
 /// but when unspecified (None), we look at a local file called ./machlist-resources.toml
 /// and then ~/.machlist/resources.toml
-fn parse_resources<P: AsRef<Path>>(file: Option<P>) -> Result<Resource> {
-    let content = match file {
-        None => {
-            let local = machlist_local();
-            let path = Path::new("machlist-resources.toml");
-            if path.is_file() {
-                std::fs::read_to_string(path)?
-            } else if local.is_file() {
-                std::fs::read_to_string(local)?
-            } else {
-                panic!("no machlist file found")
-            }
-        }
-        Some(p) => std::fs::read_to_string(p)?,
-    };
+fn parse_resources<P: AsRef<Path>>(file: P) -> Result<Resource> {
+    let file = file.as_ref();
+    let content = std::fs::read_to_string(file)
+        .with_context(|| format!("Failed to parse resource file {}", file.display()))?;
 
     let values: Resource = toml::de::from_str(&content)?;
     Ok(values)
@@ -84,9 +73,9 @@ fn parse_resources<P: AsRef<Path>>(file: Option<P>) -> Result<Resource> {
 
 impl Resource {
     pub fn get_target_env(&self, target_env: &str) -> Result<&EnvironmentDef<ServerDef>> {
-        self.server.get(target_env).ok_or(anyhow!(
-            "cannot find specified target environment in servers"
-        ))
+        self.server
+            .get(target_env)
+            .ok_or_else(|| anyhow!("cannot find specified target environment in servers"))
     }
 
     pub fn get_target_env_resources(
@@ -103,7 +92,9 @@ impl Resource {
             None => Ok(None),
             Some(u) => {
                 if let Some(env_name) = u.strip_prefix("env:") {
-                    Ok(Some(std::env::var(env_name)?))
+                    Ok(Some(std::env::var(env_name).with_context(|| {
+                        format!("Cannot find environment variable {}", env_name)
+                    })?))
                 } else {
                     Ok(Some(u.clone()))
                 }
@@ -116,7 +107,7 @@ impl EnvironmentDef<ServerDef> {
     pub fn get_machine(&self, machine_name: &str) -> Result<&ServerDef> {
         self.0
             .get(machine_name)
-            .ok_or(anyhow!("cannot find {}", machine_name))
+            .ok_or_else(|| anyhow!("cannot find {}", machine_name))
     }
 
     pub fn list_non_proxies(&self) -> impl Iterator<Item = (&String, &ServerDef)> {
@@ -187,7 +178,7 @@ fn ssh_login(
 }
 
 fn shell(common: &CommonArgs, target_env: &str, machine_name: &str) -> Result<()> {
-    let resources = parse_resources(common.res_file.as_ref())?;
+    let resources = parse_resources(&common.res_file)?;
     let user = resources.get_username()?;
 
     let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
@@ -217,7 +208,7 @@ fn copy_from(
     machine_name: &str,
     copy_path: &str,
 ) -> Result<()> {
-    let resources = parse_resources(common.res_file.as_ref())?;
+    let resources = parse_resources(&common.res_file)?;
     let user = resources.get_username()?;
 
     let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
@@ -249,7 +240,7 @@ fn copy_to(
     machine_name: &str,
     copy_path: &str,
 ) -> Result<()> {
-    let resources = parse_resources(common.res_file.as_ref())?;
+    let resources = parse_resources(&common.res_file)?;
     let user = resources.get_username()?;
 
     let ssh_opt = ssh_login(user.as_deref(), &resources, target_env, machine_name)?;
@@ -284,7 +275,7 @@ fn tunnel(
     use std::str::FromStr;
     let local_port = local_port.map(|x| u16::from_str(x).expect("local port is not valid port"));
 
-    let resources = parse_resources(common.res_file.as_ref())?;
+    let resources = parse_resources(&common.res_file)?;
     let user = resources.get_username()?;
 
     let defs = resources.get_target_env_resources(target_env)?;
@@ -322,7 +313,7 @@ fn tunnel(
 }
 
 fn list(common: &CommonArgs, target_env: &Option<&str>) -> Result<()> {
-    let resources = parse_resources(common.res_file.as_ref())?;
+    let resources = parse_resources(&common.res_file)?;
 
     if let Some(target_env) = target_env {
         let envdef = resources.get_target_env(*target_env)?;
@@ -340,7 +331,7 @@ fn list(common: &CommonArgs, target_env: &Option<&str>) -> Result<()> {
 
 struct CommonArgs {
     verbose: u64,
-    res_file: Option<PathBuf>,
+    res_file: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -363,6 +354,8 @@ fn main() -> Result<()> {
     const ARG_TUNNEL_RESOURCE: &str = "tunnel-resource";
     const ARG_TUNNEL_LOCAL_PORT: &str = "tunnel-local-port";
 
+    let default_machlist_file = machlist_local().display().to_string();
+
     let arg_target_env = Arg::with_name(ARG_TARGET_ENV)
         .help("Target environment (alpha, prod, ..)")
         .takes_value(true)
@@ -375,13 +368,16 @@ fn main() -> Result<()> {
     let app = App::new("machlist")
         .arg(
             Arg::with_name(ARG_VERBOSE)
+                .global(true)
                 .help("Increase client verbosity (use multiple times to increase)")
                 .multiple(true)
                 .short("v"),
         )
         .arg(
             Arg::with_name(ARG_RES_FILE)
-                .help("TOML Resource file to use (default: resources.toml)")
+                .help("TOML Resource file to use")
+                .default_value(default_machlist_file.as_str())
+                .global(true)
                 .multiple(false)
                 .takes_value(true)
                 .short("r"),
@@ -437,12 +433,9 @@ fn main() -> Result<()> {
     let m = app.get_matches();
 
     let verbose = m.occurrences_of(ARG_VERBOSE);
-    let res_file = m.value_of(ARG_RES_FILE);
+    let res_file = m.value_of(ARG_RES_FILE).unwrap().into();
 
-    let common = CommonArgs {
-        verbose,
-        res_file: res_file.map(|v| v.to_string().into()),
-    };
+    let common = CommonArgs { verbose, res_file };
 
     const DEFAULT_ENV: &str = "alpha";
 
